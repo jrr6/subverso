@@ -21,6 +21,10 @@ Usage: subverso-extract-mod MOD [OUT]
 MOD is the name of a Lean module, and OUT is the destination of the JSON.
 If OUT is not specified, the JSON is emitted to standard output.
 
+The output JSON contains two fields: \"messages\", which contains the message
+log, and \"commands\", which contains the commands in the module in the format
+described below.
+
 Each command in the module is represented as a JSON object with the following
 fields:
 
@@ -118,7 +122,16 @@ unsafe def go (suppressedNamespaces : List Name) (mod : String) (out : IO.FS.Str
         code := hl
       }
 
-    out.putStrLn (toString (Json.arr (items.map toJson)))
+    let withNewline (str : String) :=
+      if str == "" || str.back != '\n' then str ++ "\n" else str
+    let msgs ← msgs.mapM fun msg => do
+      let head := if msg.caption != "" then msg.caption ++ ":\n" else ""
+      let txt := withNewline <| head ++ (← msg.data.toString)
+      pure (msg.severity, txt)
+
+    let outputJson := Json.mkObj [("messages", Json.arr (msgs.map toJson)),
+                                  ("commands", Json.arr (items.map toJson))]
+    out.putStrLn (toString outputJson)
 
     return (0 : UInt32)
 
