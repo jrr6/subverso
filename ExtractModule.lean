@@ -43,43 +43,44 @@ fields:
 /--
 Creates a `ModuleItem` from source that could not be parsed.
 -/
+
+  -- TODO: process messages linearly -- calling this repeatedly for s spans with
+  -- an m-message log should be O(max(m,s)), not O(m*s)
+def findMessagesForUnparsedSpan (src : Substring) (msgs : Array Message) (fm : FileMap) : IO Highlighted := do
+  let msgsHere := msgs.filterMap fun m =>
+    let pos := fm.ofPosition m.pos
+    let endPos := fm.ofPosition (m.endPos.getD m.pos)
+    if src.startPos ≤ pos && pos ≤ src.stopPos then
+      some (m, pos, min src.stopPos endPos)
+    else
+      none
+
+  if msgsHere.isEmpty then
+    return .text src.toString
+
+  let mut res := #[]
+  for (msg, start, fin) in msgsHere do
+    if src.startPos < start then
+      let initialSubstr := { src with stopPos := start }
+      res := res.push (.text initialSubstr.toString)
+    let kind : Highlighted.Span.Kind :=
+      match msg.severity with
+      | .error => .error
+      | .warning => .warning
+      | .information => .info
+    let content := { src with startPos := start, stopPos := fin }
+    res := res.push (.span #[(kind, ← Highlighting.openUntil.contents msg)] (.text content.toString))
+    if fin < src.stopPos then
+      let finalSubstr := { src with startPos := fin }
+      res := res.push (.text finalSubstr.toString)
+  return .seq res
+
 def ModuleItem.ofUnparsed (input : String) (start stop : String.Pos) (fm : FileMap) (msgs : Array Message) : IO ModuleItem := return {
   range := some (fm.toPosition start, fm.toPosition stop)
   kind := nullKind
   defines := #[]
-  code := (← findMessagesForUnparsedSpan (Substring.mk input start stop) msgs)
+  code := (← findMessagesForUnparsedSpan (Substring.mk input start stop) msgs fm)
 }
-where
-  -- TODO: process messages linearly -- calling this repeatedly for s spans with
-  -- an m-message log should be O(max(m,s)), not O(m*s)
-  findMessagesForUnparsedSpan (src : Substring) (msgs : Array Message) : IO Highlighted := do
-    let msgsHere := msgs.filterMap fun m =>
-      let pos := fm.ofPosition m.pos
-      let endPos := fm.ofPosition (m.endPos.getD m.pos)
-      if src.startPos ≤ pos && pos ≤ src.stopPos then
-        some (m, pos, min src.stopPos endPos)
-      else
-        none
-
-    if msgsHere.isEmpty then
-      return .text src.toString
-
-    let mut res := #[]
-    for (msg, start, fin) in msgsHere do
-      if src.startPos < start then
-        let initialSubstr := { src with stopPos := start }
-        res := res.push (.text initialSubstr.toString)
-      let kind : Highlighted.Span.Kind :=
-        match msg.severity with
-        | .error => .error
-        | .warning => .warning
-        | .information => .info
-      let content := { src with startPos := start, stopPos := fin }
-      res := res.push (.span #[(kind, ← Highlighting.openUntil.contents msg)] (.text content.toString))
-      if fin < src.stopPos then
-        let finalSubstr := { src with startPos := fin }
-        res := res.push (.text finalSubstr.toString)
-    return .seq res
 
 def addMissingSubstrs (stxs : Array Syntax) (inputCtx : Parser.InputContext) : Id (Array (Syntax ⊕ Substring)) := do
   -- HACK: fill in the (malformed) source that was skipped by the parser
@@ -130,13 +131,14 @@ unsafe def go (mod : String) (out : IO.FS.Stream) : IO UInt32 := do
         let spos := headerStx.raw.getPos?.getD 0
         let pos  := ictx.fileMap.toPosition spos
         let msgs := msgs.add { fileName := ictx.fileName, data := toString e, pos := pos }
-        let msgs ← Compat.messageLogArray msgs |> formatMessages
+        let msgs := Compat.messageLogArray msgs
         let items : Array ModuleItem := #[{
           range := some (fm.toPosition 0, fm.toPosition contents.endPos)
           kind := nullKind
           defines := #[]
-          code := .text contents
+          code := (← findMessagesForUnparsedSpan contents.toSubstring msgs fm)
         }]
+        let msgs ← formatMessages msgs
         let outputJson := Json.mkObj [("messages", Json.arr (msgs.map toJson)),
                                   ("commands", Json.arr (items.map toJson))]
         out.putStrLn (toString outputJson)
