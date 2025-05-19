@@ -50,7 +50,7 @@ def ModuleItem.ofUnparsed (input : String) (start stop : String.Pos) (fm : FileM
   code := (← findMessagesForUnparsedSpan (Substring.mk input start stop) msgs)
 }
 where
-    -- TODO: process messages linearly -- calling this repeatedly for s spans with
+  -- TODO: process messages linearly -- calling this repeatedly for s spans with
   -- an m-message log should be O(max(m,s)), not O(m*s)
   findMessagesForUnparsedSpan (src : Substring) (msgs : Array Message) : IO Highlighted := do
     let msgsHere := msgs.filterMap fun m =>
@@ -96,6 +96,14 @@ def addMissingSubstrs (stxs : Array Syntax) (inputCtx : Parser.InputContext) : I
     last := stx.getTrailingTailPos?.getD this
   return stxOrStrs
 
+def formatMessages (log : Array Message) : IO (Array (MessageSeverity × String)) := do
+  let withNewline (str : String) :=
+    if str == "" || str.back != '\n' then str ++ "\n" else str
+  log.mapM fun msg => do
+    let head := if msg.caption != "" then msg.caption ++ ":\n" else ""
+    let txt := withNewline <| head ++ (← msg.data.toString)
+    pure (msg.severity, txt)
+
 unsafe def go (mod : String) (out : IO.FS.Stream) : IO UInt32 := do
   try
     initSearchPath (← findSysroot)
@@ -114,7 +122,26 @@ unsafe def go (mod : String) (out : IO.FS.Stream) : IO UInt32 := do
     let (headerStx, parserState, msgs) ← Parser.parseHeader ictx
     let imports := headerToImports headerStx
     enableInitializersExecution
-    let env ← Compat.importModules imports {}
+    -- TODO: still parse (but don't elaborate) in presence of import errors
+    let env ←
+      try
+        Compat.importModules imports {}
+      catch e =>
+        let spos := headerStx.raw.getPos?.getD 0
+        let pos  := ictx.fileMap.toPosition spos
+        let msgs := msgs.add { fileName := ictx.fileName, data := toString e, pos := pos }
+        let msgs ← Compat.messageLogArray msgs |> formatMessages
+        let items : Array ModuleItem := #[{
+          range := some (fm.toPosition 0, fm.toPosition contents.endPos)
+          kind := nullKind
+          defines := #[]
+          code := .text contents
+        }]
+        let outputJson := Json.mkObj [("messages", Json.arr (msgs.map toJson)),
+                                  ("commands", Json.arr (items.map toJson))]
+        out.putStrLn (toString outputJson)
+
+        return (0 : UInt32)
     let pctx : Context := {inputCtx := ictx}
 
     let commandState := {env, maxRecDepth := defaultMaxRecDepth, messages := msgs}
@@ -149,13 +176,7 @@ unsafe def go (mod : String) (out : IO.FS.Stream) : IO UInt32 := do
         code := hl
       }
 
-    let withNewline (str : String) :=
-      if str == "" || str.back != '\n' then str ++ "\n" else str
-    let msgs ← msgs.mapM fun msg => do
-      let head := if msg.caption != "" then msg.caption ++ ":\n" else ""
-      let txt := withNewline <| head ++ (← msg.data.toString)
-      pure (msg.severity, txt)
-
+    let msgs ← formatMessages msgs
     let outputJson := Json.mkObj [("messages", Json.arr (msgs.map toJson)),
                                   ("commands", Json.arr (items.map toJson))]
     out.putStrLn (toString outputJson)
