@@ -40,7 +40,61 @@ fields:
    specifics of this representation are an implementation detail, and it should
    be deserialized using the same version of SubVerso.
 "
+/--
+Creates a `ModuleItem` from source that could not be parsed.
+-/
+def ModuleItem.ofUnparsed (input : String) (start stop : String.Pos) (fm : FileMap) (msgs : Array Message) : IO ModuleItem := return {
+  range := some (fm.toPosition start, fm.toPosition stop)
+  kind := nullKind
+  defines := #[]
+  code := (← findMessagesForUnparsedSpan (Substring.mk input start stop) msgs)
+}
+where
+    -- TODO: process messages linearly -- calling this repeatedly for s spans with
+  -- an m-message log should be O(max(m,s)), not O(m*s)
+  findMessagesForUnparsedSpan (src : Substring) (msgs : Array Message) : IO Highlighted := do
+    let msgsHere := msgs.filterMap fun m =>
+      let pos := fm.ofPosition m.pos
+      let endPos := fm.ofPosition (m.endPos.getD m.pos)
+      if src.startPos ≤ pos && pos ≤ src.stopPos then
+        some (m, pos, min src.stopPos endPos)
+      else
+        none
 
+    if msgsHere.isEmpty then
+      return .text src.toString
+
+    let mut res := #[]
+    for (msg, start, fin) in msgsHere do
+      if src.startPos < start then
+        let initialSubstr := { src with stopPos := start }
+        res := res.push (.text initialSubstr.toString)
+      let kind : Highlighted.Span.Kind :=
+        match msg.severity with
+        | .error => .error
+        | .warning => .warning
+        | .information => .info
+      let content := { src with startPos := start, stopPos := fin }
+      res := res.push (.span #[(kind, ← Highlighting.openUntil.contents msg)] (.text content.toString))
+      if fin < src.stopPos then
+        let finalSubstr := { src with startPos := fin }
+        res := res.push (.text finalSubstr.toString)
+    return .seq res
+
+def addMissingSubstrs (stxs : Array Syntax) (inputCtx : Parser.InputContext) : Id (Array (Syntax ⊕ Substring)) := do
+  -- HACK: fill in the (malformed) source that was skipped by the parser
+  let mut last : String.Pos := 0
+  let mut stxOrStrs : Array (Syntax ⊕ Substring) := #[]
+  for stx in stxs do
+    let some this := stx.getPos?
+      | stxOrStrs := stxOrStrs.push (.inl stx)  -- empty headers have no info
+        continue
+    if this != last then
+      let missedStr := Substring.mk inputCtx.input last this
+      stxOrStrs := stxOrStrs.push (.inr missedStr)
+    stxOrStrs := stxOrStrs.push (.inl stx)
+    last := stx.getTrailingTailPos?.getD this
+  return stxOrStrs
 
 unsafe def go (mod : String) (out : IO.FS.Stream) : IO UInt32 := do
   try
@@ -72,10 +126,17 @@ unsafe def go (mod : String) (out : IO.FS.Stream) : IO UInt32 := do
     let cmdStx := (← cmdSt.get).commands
 
     let infos := (← cmdSt.get).commandState.infoState.trees
+    -- TODO: hide silent messages
     let msgs := Compat.messageLogArray (← cmdSt.get).commandState.messages
 
     let mut items : Array ModuleItem := #[]
+    let mut lastPos : String.Pos := 0
     for cmd in #[headerStx] ++ cmdStx do
+      if let some thisPos := cmd.getPos? then
+        if thisPos != lastPos then
+          let missedItem ← ModuleItem.ofUnparsed ictx.input lastPos thisPos fm msgs
+          items := items.push missedItem
+        lastPos := cmd.getTrailingTailPos?.getD thisPos
       let hl ← (Frontend.runCommandElabM <| liftTermElabM <| highlight cmd msgs infos) pctx cmdSt
       let defs := hl.definedNames.toArray
 
