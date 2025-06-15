@@ -132,6 +132,7 @@ unsafe def go (mod : String) (out : IO.FS.Stream) : IO UInt32 := do
         let pos  := ictx.fileMap.toPosition spos
         let msgs := msgs.add { fileName := ictx.fileName, data := toString e, pos := pos }
         let msgs := Compat.messageLogArray msgs
+        -- FIXME: this appears not to be properly attaching the hover
         let items : Array ModuleItem := #[{
           range := some (fm.toPosition 0, fm.toPosition contents.endPos)
           kind := nullKind
